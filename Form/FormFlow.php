@@ -6,16 +6,17 @@ use Craue\FormFlowBundle\Event\PostBindRequestEvent;
 use Craue\FormFlowBundle\Event\PostBindSavedDataEvent;
 use Craue\FormFlowBundle\Event\PostValidateEvent;
 use Craue\FormFlowBundle\Event\PreBindEvent;
+use Craue\FormFlowBundle\Storage\StorageInterface;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\Form\FormFactoryInterface;
 use Symfony\Component\Form\FormInterface;
 use Symfony\Component\Form\FormTypeInterface;
 use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\HttpFoundation\Session;
 
 /**
  * @author Christian Raue <christian.raue@gmail.com>
  * @author Marcus Stöhr <dafish@soundtrack-board.de>
+ * @author Toni Uebernickel <tuebernickel@gmail.com>
  * @copyright 2011-2012 Christian Raue
  * @license http://www.opensource.org/licenses/mit-license.php MIT License
  */
@@ -40,9 +41,9 @@ class FormFlow {
 	protected $request;
 
 	/**
-	 * @var Session
+	 * @var StorageInterface
 	 */
-	protected $session;
+	protected $storage;
 
 	/**
 	 * @var EventDispatcherInterface
@@ -67,7 +68,7 @@ class FormFlow {
 	/**
 	 * @var string
 	 */
-	protected $sessionDataKey;
+	protected $stepDataKey;
 
 	/**
 	 * @var string
@@ -75,12 +76,12 @@ class FormFlow {
 	protected $validationGroupPrefix;
 
 	/**
-	 * @var int
+	 * @var integer
 	 */
 	protected $maxSteps;
 
 	/**
-	 * @var int
+	 * @var integer
 	 */
 	protected $currentStep;
 
@@ -95,7 +96,7 @@ class FormFlow {
 	protected $stepDescriptions = null;
 
 	/**
-	 * @var int[]
+	 * @var integer[]
 	 */
 	protected $skipSteps = array();
 
@@ -124,10 +125,10 @@ class FormFlow {
 	}
 
 	/**
-	 * @param Session $session
+	 * @param StorageInterface $storage
 	 */
-	public function setSession(Session $session) {
-		$this->session = $session;
+	public function setStorage(StorageInterface $storage) {
+		$this->storage = $storage;
 	}
 
 	/**
@@ -154,8 +155,8 @@ class FormFlow {
 		if (empty($this->formTransitionKey)) {
 			$this->formTransitionKey = $this->id. '_transition';
 		}
-		if (empty($this->sessionDataKey)) {
-			$this->sessionDataKey = $this->id. '_data';
+		if (empty($this->stepDataKey)) {
+			$this->stepDataKey = $this->id. '_data';
 		}
 	}
 
@@ -183,12 +184,12 @@ class FormFlow {
 		return $this->formTransitionKey;
 	}
 
-	public function setSessionDataKey($sessionDataKey) {
-		$this->sessionDataKey = $sessionDataKey;
+	public function setStepDataKey($stepDataKey) {
+		$this->stepDataKey = $stepDataKey;
 	}
 
-	public function getSessionDataKey() {
-		return $this->sessionDataKey;
+	public function getStepDataKey() {
+		return $this->stepDataKey;
 	}
 
 	public function setValidationGroupPrefix($validationGroupPrefix) {
@@ -236,7 +237,7 @@ class FormFlow {
 	}
 
 	/**
-	 * @param int|int[] $steps
+	 * @param integer|integer[] $steps
 	 */
 	public function addSkipStep($steps) {
 		if (is_scalar($steps)) {
@@ -251,7 +252,7 @@ class FormFlow {
 	}
 
 	/**
-	 * @param int|int[] $steps
+	 * @param integer|integer[] $steps
 	 */
 	public function removeSkipStep($steps) {
 		if (is_scalar($steps)) {
@@ -272,9 +273,9 @@ class FormFlow {
 	}
 
 	/**
-	 * @param int $step Assumed step to which skipped steps shall be applied to.
-	 * @param int $direction Either 1 (to skip forwards) or -1 (to skip backwards).
-	 * @return int Target step with skipping applied.
+	 * @param integer $step Assumed step to which skipped steps shall be applied to.
+	 * @param integer $direction Either 1 (to skip forwards) or -1 (to skip backwards).
+	 * @return integer Target step with skipping applied.
 	 */
 	public function applySkipping($step, $direction = 1) {
 		if ($direction !== 1 && $direction !== -1) {
@@ -290,19 +291,19 @@ class FormFlow {
 	}
 
 	public function reset() {
-		$this->session->remove($this->sessionDataKey);
+		$this->storage->remove($this->stepDataKey);
 		$this->currentStep = $this->getFirstStep();
 	}
 
 	/**
-	 * @return int First visible step, which may be greater than 1 if steps are skipped.
+	 * @return integer First visible step, which may be greater than 1 if steps are skipped.
 	 */
 	public function getFirstStep() {
 		return $this->applySkipping(1);
 	}
 
 	/**
-	 * @return int Last visible step, which may be less than $this->maxSteps if steps are skipped.
+	 * @return integer Last visible step, which may be less than $this->maxSteps if steps are skipped.
 	 */
 	public function getLastStep() {
 		return $this->applySkipping($this->maxSteps, -1);
@@ -319,7 +320,7 @@ class FormFlow {
 			return true;
 		}
 
-		return array_key_exists($step, $this->getSessionData());
+		return array_key_exists($step, $this->retrieveStepData());
 	}
 
 	public function getRequestedTransition() {
@@ -362,7 +363,7 @@ class FormFlow {
 	}
 
 	public function bind($formData) {
-		if (!$this->allowDynamicStepNavigation && $this->request->getMethod() === 'GET') {
+		if (!$this->allowDynamicStepNavigation && $this->request->isMethod('GET')) {
 			$this->reset();
 			return;
 		}
@@ -372,7 +373,7 @@ class FormFlow {
 			return;
 		}
 
-		$event = new PreBindEvent();
+		$event = new PreBindEvent($this);
 		$this->eventDispatcher->dispatch(FormFlowEvents::PRE_BIND, $event);
 
 		$requestedStep = $this->determineCurrentStep();
@@ -396,67 +397,67 @@ class FormFlow {
 	}
 
 	public function saveCurrentStepData() {
-		$sessionData = $this->getSessionData();
+		$stepData = $this->retrieveStepData();
 
-		$sessionData[$this->currentStep] = $this->request->request->get($this->formType->getName(), array());
+		$stepData[$this->currentStep] = $this->request->request->get($this->formType->getName(), array());
 
-		$this->setSessionData($sessionData);
+		$this->saveStepData($stepData);
 	}
 
 	/**
 	 * Invalidates data for steps >= $fromStep.
-	 * @param int $fromStep
+	 * @param integer $fromStep
 	 */
 	public function invalidateStepData($fromStep) {
-		$sessionData = $this->getSessionData();
+		$stepData = $this->retrieveStepData();
 
 		for ($step = $fromStep; $step < $this->maxSteps; ++$step) {
-			unset($sessionData[$step]);
+			unset($stepData[$step]);
 		}
 
-		$this->setSessionData($sessionData);
+		$this->saveStepData($stepData);
 	}
 
 	/**
 	 * Updates form data class with form data from previously saved steps.
 	 * @param mixed $formData
-	 * @param array $formOptions
+	 * @param array $options
 	 */
-	public function applyDataFromSavedSteps($formData, array $formOptions = array()) {
-		$sessionData = $this->getSessionData();
+	public function applyDataFromSavedSteps($formData, array $options = array()) {
+		$stepData = $this->retrieveStepData();
 
 		/*
 		 * Iteration $step === $this->currentStep is only needed to fill out the form when using the "back" button.
 		 */
 		for ($step = 1; $step <= $this->maxSteps; ++$step) {
 			if ($this->isStepDone($step)) {
-				$options = $this->getFormOptions($formData, $step, $formOptions);
-				$stepForm = $this->formFactory->create($this->formType, $formData, $options);
-				if (array_key_exists($step, $sessionData)) {
-					$stepForm->bind($sessionData[$step]);
+				if (array_key_exists($step, $stepData)) {
+					$stepForm = $this->createFormForStep($formData, $step, $options);
+					$stepForm->bind($stepData[$step]);
 
-					$event = new PostBindSavedDataEvent($formData, $step);
+					$event = new PostBindSavedDataEvent($this, $formData, $step);
 					$this->eventDispatcher->dispatch(FormFlowEvents::POST_BIND_SAVED_DATA, $event);
 				}
 			}
 		}
 	}
 
+	/**
+	 * Creates the form for the current step.
+	 * @param mixed $formData
+	 * @param array $options
+	 * @return FormInterface
+	 */
 	public function createForm($formData, array $options = array()) {
-		if (!$this->formType instanceof FormTypeInterface) {
-			throw new \RuntimeException(sprintf('The form type has to be an instance of type "%s", but "%s" given.',
-					'Symfony\Component\Form\FormTypeInterface',
-					is_object($this->formType) ? get_class($this->formType) : gettype($this->formType)
-			));
-		}
-
-		return $this->formFactory->create($this->formType, $formData,
-				$this->getFormOptions($formData, $this->currentStep, $options));
+		return $this->createFormForStep($formData, $this->currentStep, $options);
 	}
 
 	public function getFormOptions($formData, $step, array $options = array()) {
 		$options['flowStep'] = $step;
-		$options['validation_groups'] = $this->validationGroupPrefix . $step;
+
+		if (!array_key_exists('validation_groups', $options)) {
+			$options['validation_groups'] = $this->validationGroupPrefix . $step;
+		}
 
 		return $options;
 	}
@@ -464,6 +465,13 @@ class FormFlow {
 	public function getStepDescriptions() {
 		if ($this->stepDescriptions === null) {
 			$this->stepDescriptions = $this->loadStepDescriptions();
+		}
+
+		$stepDescriptionsCount = count($this->stepDescriptions);
+		if ($stepDescriptionsCount > 0 && $stepDescriptionsCount !== $this->maxSteps) {
+			throw new \RuntimeException(sprintf('The number of steps (%u) doesn\'t match the number of step descriptions (%u). Either update the descriptions or remove them.',
+					$this->maxSteps, $stepDescriptionsCount
+			));
 		}
 
 		return $this->stepDescriptions;
@@ -481,17 +489,17 @@ class FormFlow {
 	}
 
 	public function isValid(FormInterface $form) {
-		if ($this->request->getMethod() === 'POST' && !in_array($this->getRequestedTransition(), array(
+		if ($this->request->isMethod('POST') && !in_array($this->getRequestedTransition(), array(
 			self::TRANSITION_BACK,
 			self::TRANSITION_RESET,
 		))) {
 			$form->bindRequest($this->request);
 
-			$event = new PostBindRequestEvent($form->getData(), $this->currentStep);
+			$event = new PostBindRequestEvent($this, $form->getData(), $this->currentStep);
 			$this->eventDispatcher->dispatch(FormFlowEvents::POST_BIND_REQUEST, $event);
 
 			if ($form->isValid()) {
-				$event = new PostValidateEvent($form->getData());
+				$event = new PostValidateEvent($this, $form->getData());
 				$this->eventDispatcher->dispatch(FormFlowEvents::POST_VALIDATE, $event);
 
 				return true;
@@ -502,6 +510,26 @@ class FormFlow {
 	}
 
 	/**
+	 * Creates the form for the given step.
+	 * @param mixed $formData
+	 * @param integer $step
+	 * @param array $options
+	 * @return FormInterface
+	 */
+	protected function createFormForStep($formData, $step, array $options = array()) {
+		if (!$this->formType instanceof FormTypeInterface) {
+			throw new \RuntimeException(sprintf('The form type has to be an instance of type "%s", but "%s" given.',
+					'Symfony\Component\Form\FormTypeInterface',
+					is_object($this->formType) ? get_class($this->formType) : gettype($this->formType)
+			));
+		}
+
+		$options = $this->getFormOptions($formData, $step, $options);
+
+		return $this->formFactory->create($this->formType, $formData, $options);
+	}
+
+	/**
 	 * Defines a description for each step used to render the step list.
 	 * @return string[] Value with index 0 is description for step 1.
 	 */
@@ -509,12 +537,12 @@ class FormFlow {
 		return array();
 	}
 
-	protected function getSessionData() {
-		return $this->session->get($this->sessionDataKey, array());
+	protected function retrieveStepData() {
+		return $this->storage->get($this->stepDataKey, array());
 	}
 
-	protected function setSessionData(array $sessionData) {
-		$this->session->set($this->sessionDataKey, $sessionData);
+	protected function saveStepData(array $data) {
+		$this->storage->set($this->stepDataKey, $data);
 	}
 
 }
